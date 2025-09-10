@@ -1,0 +1,654 @@
+#!/usr/bin/env python3
+"""
+StockMarketBot v3.2
+Enhanced All-in-One Daily Financial Report Generator
+Date: September 10, 2025
+"""
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from prophet import Prophet
+import requests
+from bs4 import BeautifulSoup
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import os
+from datetime import datetime, timedelta
+import warnings
+import logging
+import re
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+logging.getLogger('prophet').setLevel(logging.WARNING)
+logging.getLogger('cmdstanpy').setLevel(logging.ERROR)  # Silence chain processing logs
+
+class StockMarketBot:
+    def __init__(self, save_directory="/home/ecdayrit/Documents"):
+        self.save_directory = save_directory
+        self.timestamp = datetime.now().strftime("%Y%m%d")
+        self.report_data = {}
+        self.forecasts = {}
+        self.dynamic_tickers = set()  # discovered from news
+        
+        print("📁 CSV files will be saved to:", self.save_directory)
+        print("📋 Building comprehensive financial report...")
+        
+    # -------------------------- Core Forecast Pipeline --------------------------
+    def run_forecast(self, df, periods=7, freq='D', label="Asset"):
+        try:
+            if df.empty or 'ds' not in df.columns or 'y' not in df.columns:
+                raise ValueError(f"{label} data must have 'ds' and 'y' columns")
+            if pd.api.types.is_datetime64_any_dtype(df['ds']):
+                if getattr(df['ds'].dt, 'tz', None) is not None:
+                    df['ds'] = df['ds'].dt.tz_localize(None)
+            df = df.dropna()
+            if len(df) < 10:
+                raise ValueError(f"Insufficient data points for {label}")
+            model = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False, changepoint_prior_scale=0.05)
+            model.fit(df)
+            future = model.make_future_dataframe(periods=periods, freq=freq)
+            forecast = model.predict(future)
+            result = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+            result.columns = ['Date', 'Forecast', 'Lower_Bound', 'Upper_Bound']
+            return result
+        except Exception as e:
+            print(f"❌ Error in {label} forecast: {e}")
+            return pd.DataFrame()
+
+    # -------------------------- Data Helpers --------------------------
+    def _make_df_from_yf(self, data):
+        if data is None or data.empty or 'Close' not in data.columns:
+            return pd.DataFrame()
+        close = data['Close']
+        if isinstance(close, pd.DataFrame):
+            if close.shape[1] >= 1:
+                close = close.iloc[:, 0]
+        close = pd.to_numeric(close.squeeze(), errors='coerce')
+        idx = data.index
+        try:
+            if hasattr(idx, 'tz') and idx.tz is not None:
+                idx = idx.tz_localize(None)
+        except Exception:
+            pass
+        df = pd.DataFrame({'ds': idx, 'y': close}).dropna().reset_index(drop=True)
+        return df
+
+    # -------------------------- Forex --------------------------
+    def fetch_forex_direct_or_cross(self, label, direct_symbol, period="90d"):
+        """
+        Try direct pair first (e.g., JPYPHP=X). If insufficient or empty, try longer period, then cross via USD.
+        label examples: "USD/PHP", "JPY/PHP".
+        """
+        print(f"📊 Generating {label} forecast...")
+        key = label.lower().replace('/', '')
+        try:
+            # 1) Direct
+            data = yf.Ticker(direct_symbol).history(period=period)
+            df = self._make_df_from_yf(data)
+            if len(df) < 10:
+                # Try longer window
+                data = yf.Ticker(direct_symbol).history(period="180d")
+                df = self._make_df_from_yf(data)
+            # 2) If still not enough, compute via crosses
+            if len(df) < 10:
+                df = self._build_cross_pair(label)
+            
+            if len(df) < 10 or df.empty:
+                raise ValueError(f"Insufficient data points for {label}")
+
+            forecast = self.run_forecast(df, periods=7, label=label)
+            if not forecast.empty:
+                safe_label = label.lower().replace('/', '_').replace(' ', '_')
+                filename = f"{safe_label}_forecast_{self.timestamp}.csv"
+                filepath = os.path.join(self.save_directory, filename)
+                forecast.to_csv(filepath, index=False)
+                print(f"✅ {label} forecast saved to {filepath}")
+                current_rate = df['y'].iloc[-1]
+                future_rate = forecast['Forecast'].iloc[-1]
+                change_pct = ((future_rate - current_rate) / current_rate) * 100
+                self.report_data[key] = {
+                    'current': current_rate,
+                    'forecast': future_rate,
+                    'change_pct': change_pct,
+                    'status': 'success',
+                    'label': label
+                }
+                self.forecasts[key] = forecast
+            else:
+                self.report_data[key] = {'status': 'error', 'label': label}
+        except Exception as e:
+            print(f"❌ Error in {label} forecast: {e}")
+            self.report_data[key] = {'status': 'error', 'error': str(e), 'label': label}
+
+    def _build_cross_pair(self, label):
+        """
+        Build PHP crosses from USD pairs if direct is missing.
+        Rules (all return PHP per 1 unit of base currency):
+        - USD/PHP: direct via USDPHP=X
+        - JPY/PHP: USDPHP / USDJPY
+        - AUD/PHP: USDPHP * AUDUSD
+        - GBP/PHP: USDPHP * GBPUSD
+        - SGD/PHP: USDPHP / USDSGD
+        """
+        try:
+            base = label.split('/')[0]
+            # Fetch USDPHP
+            usdp_data = yf.Ticker("USDPHP=X").history(period="180d")
+            df_usdp = self._make_df_from_yf(usdp_data)
+            if len(df_usdp) < 10:
+                return pd.DataFrame()
+            df_usdp = df_usdp.set_index('ds')
+
+            if base == 'USD':
+                return df_usdp.reset_index()
+
+            if base == 'JPY':
+                ujy = self._make_df_from_yf(yf.Ticker("JPY=X").history(period="180d"))
+                if len(ujy) < 10:
+                    ujy = self._make_df_from_yf(yf.Ticker("USDJPY=X").history(period="180d"))
+                if len(ujy) < 10:
+                    return pd.DataFrame()
+                ujy = ujy.set_index('ds')
+                joined = df_usdp.join(ujy, how='inner', lsuffix='_php', rsuffix='_ujy')
+                # If USDJPY provided as JPY per USD, convert: PHP per JPY = (PHP/USD)/(JPY/USD)
+                php_per_usd = joined['y_php']
+                jpy_per_usd = joined['y_ujy']
+                php_per_jpy = php_per_usd / jpy_per_usd
+                return pd.DataFrame({'ds': joined.index, 'y': php_per_jpy}).reset_index(drop=True)
+
+            if base == 'AUD':
+                audusd = self._make_df_from_yf(yf.Ticker("AUDUSD=X").history(period="180d"))
+                if len(audusd) < 10:
+                    return pd.DataFrame()
+                audusd = audusd.set_index('ds')
+                joined = df_usdp.join(audusd, how='inner', lsuffix='_php', rsuffix='_audusd')
+                y = joined['y_php'] * joined['y_audusd']  # PHP per AUD = (PHP/USD) * (USD/AUD)
+                return pd.DataFrame({'ds': joined.index, 'y': y}).reset_index(drop=True)
+
+            if base == 'GBP':
+                gbpusd = self._make_df_from_yf(yf.Ticker("GBPUSD=X").history(period="180d"))
+                if len(gbpusd) < 10:
+                    return pd.DataFrame()
+                gbpusd = gbpusd.set_index('ds')
+                joined = df_usdp.join(gbpusd, how='inner', lsuffix='_php', rsuffix='_gbpusd')
+                y = joined['y_php'] * joined['y_gbpusd']
+                return pd.DataFrame({'ds': joined.index, 'y': y}).reset_index(drop=True)
+
+            if base == 'SGD':
+                usdsgd = self._make_df_from_yf(yf.Ticker("USDSGD=X").history(period="180d"))
+                if len(usdsgd) < 10:
+                    return pd.DataFrame()
+                usdsgd = usdsgd.set_index('ds')
+                joined = df_usdp.join(usdsgd, how='inner', lsuffix='_php', rsuffix='_usdsgd')
+                y = joined['y_php'] / joined['y_usdsgd']  # PHP per SGD = (PHP/USD) / (SGD/USD)
+                return pd.DataFrame({'ds': joined.index, 'y': y}).reset_index(drop=True)
+        except Exception:
+            return pd.DataFrame()
+        return pd.DataFrame()
+
+    # -------------------------- Crypto --------------------------
+    def fetch_crypto_data(self, symbol, name):
+        try:
+            print(f"📊 Generating {name} forecast...")
+            data = yf.Ticker(symbol).history(period="90d")
+            df = self._make_df_from_yf(data)
+            if len(df) < 10:
+                data = yf.Ticker(symbol).history(period="180d")
+                df = self._make_df_from_yf(data)
+            if len(df) < 10:
+                raise ValueError(f"No {name} data retrieved")
+            forecast = self.run_forecast(df, periods=7, label=name)
+            if not forecast.empty:
+                filename = f"{symbol.lower()}_forecast_{self.timestamp}.csv"
+                filepath = os.path.join(self.save_directory, filename)
+                forecast.to_csv(filepath, index=False)
+                print(f"✅ {name} forecast saved to {filepath}")
+                current = df['y'].iloc[-1]
+                future = forecast['Forecast'].iloc[-1]
+                change_pct = ((future - current) / current) * 100
+                self.report_data[symbol.lower()] = {'current': current, 'forecast': future, 'change_pct': change_pct, 'status': 'success', 'label': name}
+                self.forecasts[symbol.lower()] = forecast
+            else:
+                self.report_data[symbol.lower()] = {'status': 'error', 'label': name}
+        except Exception as e:
+            print(f"❌ Error in {name} forecast: {e}")
+            self.report_data[symbol.lower()] = {'status': 'error', 'error': str(e), 'label': name}
+
+    # -------------------------- Indexes & ETFs --------------------------
+    def fetch_index_data(self, symbol, name):
+        try:
+            print(f"📊 Generating {name} forecast...")
+            data = yf.Ticker(symbol).history(period="90d")
+            df = self._make_df_from_yf(data)
+            if len(df) < 10:
+                data = yf.Ticker(symbol).history(period="180d")
+                df = self._make_df_from_yf(data)
+            if len(df) < 10:
+                raise ValueError(f"No {name} data retrieved")
+            forecast = self.run_forecast(df, periods=7, label=name)
+            if not forecast.empty:
+                safe_name = name.lower().replace(' ', '_').replace('&', 'and')
+                filename = f"{safe_name}_forecast_{self.timestamp}.csv"
+                filepath = os.path.join(self.save_directory, filename)
+                forecast.to_csv(filepath, index=False)
+                print(f"✅ {name} forecast saved to {filepath}")
+                current = df['y'].iloc[-1]
+                future = forecast['Forecast'].iloc[-1]
+                change_pct = ((future - current) / current) * 100
+                key = safe_name.replace('_', '')
+                self.report_data[key] = {'current': current, 'forecast': future, 'change_pct': change_pct, 'status': 'success', 'label': name}
+                self.forecasts[key] = forecast
+            else:
+                key = name.lower().replace(' ', '').replace('&', '')
+                self.report_data[key] = {'status': 'error', 'label': name}
+        except Exception as e:
+            print(f"❌ Error in {name} forecast: {e}")
+            key = name.lower().replace(' ', '').replace('&', '')
+            self.report_data[key] = {'status': 'error', 'error': str(e), 'label': name}
+
+    def fetch_psei_data(self):
+        print("📊 Generating PSEi forecast...")
+        psei_tickers = ["^PSI", "PSEI.PS", "^PSEI", "PSI.PS"]
+        for ticker in psei_tickers:
+            try:
+                print(f"   Trying ticker: {ticker}")
+                data = yf.download(ticker, period="90d", progress=False)
+                if data.empty or 'Close' not in data.columns:
+                    raise ValueError("No data")
+                df = self._make_df_from_yf(data)
+                forecast = self.run_forecast(df, periods=7, label="PSEi")
+                if not forecast.empty:
+                    filename = f"psei_forecast_{self.timestamp}.csv"
+                    filepath = os.path.join(self.save_directory, filename)
+                    forecast.to_csv(filepath, index=False)
+                    print(f"✅ PSEi forecast saved to {filepath}")
+                    current = df['y'].iloc[-1]
+                    future = forecast['Forecast'].iloc[-1]
+                    change_pct = ((future - current) / current) * 100
+                    self.report_data['psei'] = {'current': current, 'forecast': future, 'change_pct': change_pct, 'status': 'success', 'label': 'PSEi', 'ticker': ticker}
+                    self.forecasts['psei'] = forecast
+                    return
+            except Exception as e:
+                print(f"   ❌ Error with {ticker}: {e}")
+                continue
+        try:
+            print("   Trying EPHE (MSCI Philippines ETF) as proxy")
+            data = yf.download("EPHE", period="90d", progress=False)
+            df = self._make_df_from_yf(data)
+            forecast = self.run_forecast(df, periods=7, label="EPHE (proxy for PSEi)")
+            if not forecast.empty:
+                filename = f"psei_proxy_ephe_forecast_{self.timestamp}.csv"
+                filepath = os.path.join(self.save_directory, filename)
+                forecast.to_csv(filepath, index=False)
+                print(f"✅ EPHE proxy forecast saved to {filepath}")
+                current = df['y'].iloc[-1]
+                future = forecast['Forecast'].iloc[-1]
+                change_pct = ((future - current) / current) * 100
+                self.report_data['psei'] = {'current': current, 'forecast': future, 'change_pct': change_pct, 'status': 'success', 'label': 'PSEi (EPHE proxy)', 'ticker': 'EPHE'}
+                self.forecasts['psei'] = forecast
+                return
+        except Exception as e:
+            print(f"   ❌ EPHE proxy failed: {e}")
+        print("⚠️ All PSEi tickers failed, using fallback data")
+        self.report_data['psei'] = {'status': 'error', 'error': 'All tickers failed'}
+
+    def fetch_ph_reits_data(self):
+        try:
+            print("📊 Generating Philippine REITs forecast...")
+            data = yf.Ticker("VNQ").history(period="90d")
+            df = self._make_df_from_yf(data)
+            if len(df) < 10:
+                data = yf.Ticker("VNQ").history(period="180d")
+                df = self._make_df_from_yf(data)
+            forecast = self.run_forecast(df, periods=7, label="Philippine REITs (VNQ proxy)")
+            if not forecast.empty:
+                filename = f"ph_reits_forecast_{self.timestamp}.csv"
+                filepath = os.path.join(self.save_directory, filename)
+                forecast.to_csv(filepath, index=False)
+                print(f"✅ Philippine REITs forecast saved to {filepath}")
+                current = df['y'].iloc[-1]
+                future = forecast['Forecast'].iloc[-1]
+                change_pct = ((future - current) / current) * 100
+                self.report_data['phreits'] = {'current': current, 'forecast': future, 'change_pct': change_pct, 'status': 'success', 'label': 'Philippine REITs'}
+                self.forecasts['phreits'] = forecast
+            else:
+                self.report_data['phreits'] = {'status': 'error'}
+        except Exception as e:
+            print(f"❌ Error in Philippine REITs forecast: {e}")
+            self.report_data['phreits'] = {'status': 'error', 'error': str(e)}
+
+    # -------------------------- US Movers --------------------------
+    def fetch_us_top_movers(self, top_n=3):
+        """Fetch top US gainers and losers from Yahoo Finance screener."""
+        movers = {'gainers': [], 'losers': []}
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            for cat in ['gainers', 'losers']:
+                url = f"https://finance.yahoo.com/{cat}"
+                res = requests.get(url, headers=headers, timeout=10)
+                soup = BeautifulSoup(res.content, 'html.parser')
+                rows = soup.select('table tbody tr')
+                for r in rows[:top_n]:
+                    cols = r.find_all('td')
+                    if len(cols) >= 6:
+                        ticker = cols[0].get_text(strip=True)
+                        name = cols[1].get_text(strip=True)
+                        change_pct = cols[4].get_text(strip=True)
+                        movers[cat].append({'ticker': ticker, 'name': name, 'change_pct': change_pct})
+            self.report_data['us_movers'] = movers
+        except Exception as e:
+            print(f"❌ Error fetching US movers: {e}")
+            self.report_data['us_movers'] = movers
+
+    # -------------------------- News + Dynamic Ticker Detection --------------------------
+    def fetch_news_headlines(self):
+        try:
+            print("📰 Fetching news headlines...")
+            news_sources = [
+                ("Reuters Finance", "https://www.reuters.com/business/finance/", 'article a[href]'),
+                ("Yahoo Finance", "https://finance.yahoo.com/news/", 'a[href] h3'),
+                ("Bloomberg Markets", "https://www.bloomberg.com/markets", 'a[href] h3')
+            ]
+            headlines = []
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            allowed_keywords = [
+                'stock', 'stocks', 'equity', 'equities', 'market', 'markets', 'index', 'indexes', 'indices',
+                'finance', 'financial', 'economy', 'economic', 'inflation', 'rates', 'interest', 'bonds', 'treasury',
+                'treasuries', 'yields', 'forex', 'currency', 'currencies', 'fx', 'crypto', 'cryptocurrency',
+                'bitcoin', 'ethereum', 'btc', 'eth', 'altcoin', 'stablecoin', 'exchange', 'futures', 'options',
+                'etf', 'etfs', 'ipo', 'merger', 'acquisition', 'm&a', 'earnings', 'revenue', 'guidance', 'outlook',
+                'recession', 'stimulus', 'jobs', 'employment', 'cpi', 'ppi', 'gdp', 'pmi', 'manufacturing', 'services',
+                'tech', 'technology', 'semiconductor', 'chip', 'ai', 'artificial intelligence', 'cloud', 'software',
+                'saas', 'hardware', 'data center', 'cybersecurity', 'hacking', 'breach', 'outage', 'cloud computing'
+            ]
+            for src_name, url, selector in news_sources:
+                try:
+                    res = requests.get(url, headers=headers, timeout=10)
+                    soup = BeautifulSoup(res.content, 'html.parser')
+                    # Collect anchors with titles and hrefs
+                    for a in soup.select('a[href]'):
+                        title = a.get_text(strip=True)
+                        href = a.get('href')
+                        if not title or not href:
+                            continue
+                        title_lower = title.lower()
+                        # Only keep items with allowed domain keywords
+                        if not any(k in title_lower for k in allowed_keywords):
+                            continue
+                        # Normalize href
+                        if href.startswith('/'):
+                            base = url.split('//')[0] + '//' + url.split('//')[1].split('/')[0]
+                            href = base + href
+                        headlines.append({'title': title, 'url': href})
+                    if len(headlines) >= 40:
+                        break
+                except Exception:
+                    continue
+            # Filter
+            bad_titles = {"News", "Life", "Entertainment", "Finance", "Sports", "Markets", "Business", "Home", "World", "Politics", "Technology", "Health", "Opinion", "More", "Skip to main content", "Skip to right column"}
+            cleaned = []
+            seen = set()
+            for h in headlines:
+                title = h['title'].strip()
+                url = h['url']
+                if not title or title in bad_titles or len(title.split()) < 4:
+                    continue
+                # Exclude shopping/review listicles
+                if any(x in title.lower() for x in ["best ", "review", "cordless", "cutting board", "vacuum", "deal", "discount", "promo"]):
+                    continue
+                key = (title, url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append({'title': title, 'url': url})
+                if len(cleaned) >= 10:
+                    break
+            if not cleaned:
+                cleaned = [{ 'title': 'No significant business or market-moving news found today', 'url': '#' }]
+            self.report_data['news'] = cleaned[:5]
+            # Detect dynamic tickers from titles like (AAPL), [BTC], NASDAQ:MSFT, NYSE:V, etc.
+            for item in cleaned:
+                title = item['title']
+                # Specific crypto mentions
+                if re.search(r"\b(BTC|Bitcoin)\b", title, re.I):
+                    self.dynamic_tickers.add('BTC-USD')
+                if re.search(r"\b(ETH|Ethereum)\b", title, re.I):
+                    self.dynamic_tickers.add('ETH-USD')
+                # Exchange-style tickers
+                for m in re.finditer(r"(?:NASDAQ|NYSE|AMEX|OTC|NYSEARCA)[:\s]?([A-Z]{1,5})", title):
+                    self.dynamic_tickers.add(m.group(1))
+                # Bare tickers in parentheses e.g., (AAPL)
+                for m in re.finditer(r"\(([A-Z]{1,5})\)", title):
+                    self.dynamic_tickers.add(m.group(1))
+        except Exception as e:
+            print(f"❌ Error fetching news: {e}")
+            self.report_data['news'] = [{ 'title': 'News service temporarily unavailable', 'url': '#' }]
+
+    # -------------------------- Report Generation --------------------------
+    def generate_report(self):
+        print("✅ Financial report compiled successfully")
+        print("\n" + "="*60)
+        print("GENERATED REPORT:")
+        print("="*60)
+        
+        # Build text report for console/log
+        report_lines = []
+        report_lines.append(f"📌 DAILY FINANCIAL OUTLOOK — {datetime.now().strftime('%B %d, %Y')}\n")
+        
+        # Foreign Exchange - only include successful
+        fx_order = [('usdphp', 'USD/PHP'), ('jpyphp', 'JPY/PHP'), ('audphp', 'AUD/PHP'), ('gbpphp', 'GBP/PHP'), ('sgdphp', 'SGD/PHP')]
+        fx_lines = []
+        for key, label in fx_order:
+            data = self.report_data.get(key)
+            if data and data.get('status') == 'success':
+                fx_lines.append(f"{label}: ₱{data['current']:.4f} → ₱{data['forecast']:.4f} ({data['change_pct']:+.2f}% in 7D)")
+        if fx_lines:
+            report_lines.append("🏦 FOREIGN EXCHANGE")
+            report_lines.extend(fx_lines)
+            report_lines.append("")
+        
+        # Crypto
+        crypto_lines = []
+        for sym, lab in [("btc-usd", "Bitcoin"), ("eth-usd", "Ethereum")]:
+            data = self.report_data.get(sym)
+            if data and data.get('status') == 'success':
+                crypto_lines.append(f"{lab}: ${data['current']:,.2f} → ${data['forecast']:,.2f} ({data['change_pct']:+.2f}% in 7D)")
+        if crypto_lines:
+            report_lines.append("💰 CRYPTOCURRENCY MARKETS")
+            report_lines.extend(crypto_lines)
+            report_lines.append("")
+        
+        # Stock Markets
+        stock_lines = []
+        for key, label in [("ussandp500", "US S&P 500"), ("psei", "PSEi"), ("phreits", "Philippine REITs"), ("vanguardsp500etfvoo", "VOO")]:
+            data = self.report_data.get(key)
+            if data and data.get('status') == 'success':
+                stock_lines.append(f"{label}: {data['current']:,.2f} → {data['forecast']:,.2f} ({data['change_pct']:+.2f}% in 7D)")
+        if stock_lines:
+            report_lines.append("📈 STOCK MARKETS")
+            report_lines.extend(stock_lines)
+            report_lines.append("")
+        
+        # US Movers
+        movers = self.report_data.get('us_movers', {})
+        gainers = movers.get('gainers', [])
+        losers = movers.get('losers', [])
+        if gainers or losers:
+            report_lines.append("🇺🇸 US TOP MOVERS (Today)")
+            if gainers:
+                gtxt = ", ".join([f"{g['ticker']} ({g['change_pct']})" for g in gainers])
+                report_lines.append(f"Top Gainers: {gtxt}")
+            if losers:
+                ltxt = ", ".join([f"{l['ticker']} ({l['change_pct']})" for l in losers])
+                report_lines.append(f"Top Losers: {ltxt}")
+            report_lines.append("")
+        
+        # News with titles only for console (filtered to business/markets/tech/finance)
+        report_lines.append("📰 MARKET-MOVING NEWS")
+        for item in self.report_data.get('news', []):
+            report_lines.append(f"- {item['title']}")
+        report_lines.append("")
+        
+        # Technical Notes
+        report_lines.append("📊 TECHNICAL NOTES:")
+        report_lines.append("• All forecasts use 90-day to 180-day historical data with Prophet time-series modeling")
+        report_lines.append(f"• Detailed CSV reports saved to: {self.save_directory}")
+        report_lines.append("• News links are included in the email (clickable)")
+        report_lines.append("• Philippine REITs uses VNQ ETF as proxy due to limited PH REIT data")
+        report_lines.append("")
+        report_lines.append("This automated report is generated daily for strategic financial planning.")
+        
+        # Footer
+        report_lines.append("")
+        report_lines.append("="*63)
+        report_lines.append(f"Generated by: StockMarketBot v3.2")
+        report_lines.append(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (Asia/Manila)")
+        report_lines.append("="*60)
+        
+        text_report = "\n".join(report_lines)
+        print(text_report)
+        
+        # Build HTML report for email (with hyperlinks)
+        html_parts = []
+        html_parts.append(f"<h2>📌 DAILY FINANCIAL OUTLOOK — {datetime.now().strftime('%B %d, %Y')}</h2>")
+        # FX
+        if fx_lines:
+            html_parts.append("<h3>🏦 FOREIGN EXCHANGE</h3><ul>")
+            for line in fx_lines:
+                html_parts.append(f"<li>{line}</li>")
+            html_parts.append("</ul>")
+        # Crypto
+        if crypto_lines:
+            html_parts.append("<h3>💰 CRYPTOCURRENCY MARKETS</h3><ul>")
+            for line in crypto_lines:
+                html_parts.append(f"<li>{line}</li>")
+            html_parts.append("</ul>")
+        # Stocks
+        if stock_lines:
+            html_parts.append("<h3>📈 STOCK MARKETS</h3><ul>")
+            for line in stock_lines:
+                html_parts.append(f"<li>{line}</li>")
+            html_parts.append("</ul>")
+        # Movers
+        if gainers or losers:
+            html_parts.append("<h3>🇺🇸 US TOP MOVERS (Today)</h3>")
+            if gainers:
+                html_parts.append("<p><strong>Top Gainers:</strong> " + ", ".join([f"{g['ticker']} ({g['change_pct']})" for g in gainers]) + "</p>")
+            if losers:
+                html_parts.append("<p><strong>Top Losers:</strong> " + ", ".join([f"{l['ticker']} ({l['change_pct']})" for l in losers]) + "</p>")
+        # News with links
+        html_parts.append("<h3>📰 MARKET-MOVING NEWS</h3><ul>")
+        for item in self.report_data.get('news', []):
+            t = item['title']
+            u = item['url']
+            if not u or u == '#':
+                html_parts.append(f"<li>{t}</li>")
+            else:
+                html_parts.append(f"<li><a href=\"{u}\" target=\"_blank\">{t}</a></li>")
+        html_parts.append("</ul>")
+        
+        html_parts.append("<hr>")
+        html_parts.append("<p>📊 TECHNICAL NOTES:</p>")
+        html_parts.append("<ul>")
+        html_parts.append("<li>All forecasts use 90-day to 180-day historical data with Prophet time-series modeling</li>")
+        html_parts.append(f"<li>Detailed CSV reports saved to: {self.save_directory}</li>")
+        html_parts.append("<li>News links are clickable</li>")
+        html_parts.append("<li>Philippine REITs uses VNQ ETF as proxy due to limited PH REIT data</li>")
+        html_parts.append("</ul>")
+        html_parts.append(f"<p>Generated by: StockMarketBot v3.2<br>Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (Asia/Manila)</p>")
+        html_report = "\n".join(html_parts)
+        
+        # Save text report to file
+        report_filename = f"financial_report_{self.timestamp}.txt"
+        report_filepath = os.path.join(self.save_directory, report_filename)
+        with open(report_filepath, 'w', encoding='utf-8') as f:
+            f.write(text_report)
+        
+        return text_report, html_report
+
+    # -------------------------- Email --------------------------
+    def send_email_report(self, text_report, html_report):
+        try:
+            print("📧 Sending email report...")
+            smtp_server = "smtp.gmail.com"
+            smtp_port = 587
+            sender_email = "ENTEREMAILHERE@EMAIL.COM"
+            sender_password = "ENTER YOUR 16 DIGIT GMAIL APP PASSWORD HERE"  # Replace with your Gmail App Password
+            recipient_email = "ENTEREMAILHERE@EMAIL.COM"
+            bcc_email = "ENTEREMAILHERE@EMAIL.COM"
+
+            msg = MIMEMultipart('alternative')
+            msg['From'] = sender_email
+            msg['To'] = recipient_email
+            msg['Subject'] = f"Daily Financial Report - {datetime.now().strftime('%B %d, %Y')}"
+
+            # Attach plain and HTML versions
+            part1 = MIMEText(text_report, 'plain')
+            part2 = MIMEText(html_report, 'html')
+            msg.attach(part1)
+            msg.attach(part2)
+
+            server = smtplib.SMTP(smtp_server, smtp_port)
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, [recipient_email, bcc_email], msg.as_string())
+            server.quit()
+            print("✅ Email sent successfully!")
+        except Exception as e:
+            print(f"❌ Email sending failed: {e}")
+            print("💡 Please configure your Gmail App Password in the script")
+
+    # -------------------------- Orchestrator --------------------------
+    def run_full_analysis(self):
+        try:
+            # FX: direct or cross
+            self.fetch_forex_direct_or_cross("USD/PHP", "USDPHP=X")
+            self.fetch_forex_direct_or_cross("JPY/PHP", "JPYPHP=X")
+            self.fetch_forex_direct_or_cross("AUD/PHP", "AUDPHP=X")
+            self.fetch_forex_direct_or_cross("GBP/PHP", "GBPPHP=X")
+            self.fetch_forex_direct_or_cross("SGD/PHP", "SGDPHP=X")
+
+            # Crypto
+            self.fetch_crypto_data("BTC-USD", "Bitcoin")
+            self.fetch_crypto_data("ETH-USD", "Ethereum")
+
+            # Index/ETF
+            self.fetch_index_data("^GSPC", "US S&P 500")
+            self.fetch_index_data("VOO", "Vanguard S&P 500 ETF VOO")
+            self.fetch_psei_data()
+            self.fetch_ph_reits_data()
+
+            # News + movers
+            self.fetch_news_headlines()
+            self.fetch_us_top_movers(top_n=3)
+
+            # Dynamic tickers discovered from news
+            for tkr in sorted(self.dynamic_tickers):
+                # Skip if already permanent
+                if tkr in {"BTC-USD", "ETH-USD", "^GSPC", "VOO"}:
+                    continue
+                # Try as equity on Yahoo (no suffix). If crypto symbol, it may fail harmlessly.
+                try:
+                    name = tkr
+                    self.fetch_index_data(tkr, name)
+                except Exception:
+                    continue
+
+            # Generate and send report
+            text_report, html_report = self.generate_report()
+            self.send_email_report(text_report, html_report)
+            print("\n✅ StockMarketBot completed successfully!")
+        except Exception as e:
+            print(f"❌ Critical error in analysis workflow: {e}")
+
+
+def main():
+    bot = StockMarketBot()
+    bot.run_full_analysis()
+
+
+if __name__ == "__main__":
+    main()
