@@ -1,45 +1,45 @@
-📊 StockMarketBot
+**StockMarketBot**
 
 StockMarketBot is a Python automation script that generates forecasts and market insights for currencies, cryptocurrencies, and stock indices. It automatically sends daily reports via email, with clean formatting and curated market news.
 
-🚀 Features
+**Features**
 
-🔮 Forecasts for:
+Forecasts for:
 
-USD/PHP, GBP/PHP, AUD/PHP, JPY/PHP, SGD/PHP
+  USD/PHP, GBP/PHP, AUD/PHP, JPY/PHP, SGD/PHP
 
-Bitcoin (BTC), Ethereum (ETH)
+  Bitcoin (BTC), Ethereum (ETH)
 
-Philippine Stock Exchange Index (PSEi)
+  Philippine Stock Exchange Index (PSEi)
 
-S&P 500
+  S&P 500
 
-Philippine REITs
+  Philippine REITs
 
-📰 Market news filtering (only business, finance, tech, and disruptive events)
+Market news filtering (only business, finance, tech, and disruptive events)
 
-📧 Email reports with formatted summaries
+Email reports with formatted summaries
 
-📈 Identifies top gainers/losers in US markets
+Identifies top gainers/losers in US markets
 
-🕐 Automated daily execution via cron job
+Automated daily execution via cron job
 
-📦 Requirements
+**Requirements**
 
-Python 3.8+
+  Python 3.8+
 
-Virtual environment (recommended)
+  Virtual environment (recommended)
 
-Required Python libraries:
+**Required Python libraries:**
 
-pip install yfinance pandas numpy plotly statsmodels beautifulsoup4 requests
+  pip install yfinance pandas numpy plotly statsmodels beautifulsoup4 requests
 
 
 Gmail App Password (for sending reports via Gmail SMTP)
 
-⚙️ Setup
+**Setup**
 Clone Repository
-git clone https://github.com/YOUR_USERNAME/StockMarketBot.git
+git clone https://github.com/Evexis/StockMarketBot.git
 cd StockMarketBot
 
 Create Virtual Environment
@@ -60,7 +60,7 @@ BCC_EMAIL = "bcc_email@gmail.com"
 
 Important: Use a Google App Password instead of your regular password.
 
-⏱️ Automation (Optional)
+**Automation (Optional)**
 
 To run daily at 8:00 AM (Asia/Manila), add this cron job:
 
@@ -72,7 +72,6 @@ Insert:
 CRON_TZ=Asia/Manila
 0 8 * * * /home/user/Documents/run_stockbot.sh
 
-
 Where run_stockbot.sh contains:
 
 #!/usr/bin/env bash
@@ -81,7 +80,7 @@ cd /home/ecdayrit/Documents
 source venv/bin/activate
 /usr/bin/python3 /home/user/Documents/StockMarketBot.py >> /home/user/Documents/stockbot.log 2>&1
 
-📄 Example Output
+**Example Output**
 
 Forecasts for Forex, Crypto, and Stocks
 
@@ -91,10 +90,7 @@ Curated business/market/tech news
 
 Email report with formatted sections
 
-🤝 Contributing
+**Contributing**
 
 PRs and suggestions welcome! Please fork the repo and open an issue or pull request.
 
-📜 License
-
-MIT License © 2025
