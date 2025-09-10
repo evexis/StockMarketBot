@@ -33,8 +33,8 @@ class StockMarketBot:
         self.forecasts = {}
         self.dynamic_tickers = set()  # discovered from news
         
-        print("📁 CSV files will be saved to:", self.save_directory)
-        print("📋 Building comprehensive financial report...")
+        print("CSV files will be saved to:", self.save_directory)
+        print("Building comprehensive financial report...")
         
     # -------------------------- Core Forecast Pipeline --------------------------
     def run_forecast(self, df, periods=7, freq='D', label="Asset"):
@@ -55,7 +55,7 @@ class StockMarketBot:
             result.columns = ['Date', 'Forecast', 'Lower_Bound', 'Upper_Bound']
             return result
         except Exception as e:
-            print(f"❌ Error in {label} forecast: {e}")
+            print(f"Error in {label} forecast: {e}")
             return pd.DataFrame()
 
     # -------------------------- Data Helpers --------------------------
@@ -82,7 +82,7 @@ class StockMarketBot:
         Try direct pair first (e.g., JPYPHP=X). If insufficient or empty, try longer period, then cross via USD.
         label examples: "USD/PHP", "JPY/PHP".
         """
-        print(f"📊 Generating {label} forecast...")
+        print(f"Generating {label} forecast...")
         key = label.lower().replace('/', '')
         try:
             # 1) Direct
@@ -105,7 +105,7 @@ class StockMarketBot:
                 filename = f"{safe_label}_forecast_{self.timestamp}.csv"
                 filepath = os.path.join(self.save_directory, filename)
                 forecast.to_csv(filepath, index=False)
-                print(f"✅ {label} forecast saved to {filepath}")
+                print(f"{label} forecast saved to {filepath}")
                 current_rate = df['y'].iloc[-1]
                 future_rate = forecast['Forecast'].iloc[-1]
                 change_pct = ((future_rate - current_rate) / current_rate) * 100
@@ -120,7 +120,7 @@ class StockMarketBot:
             else:
                 self.report_data[key] = {'status': 'error', 'label': label}
         except Exception as e:
-            print(f"❌ Error in {label} forecast: {e}")
+            print(f"Error in {label} forecast: {e}")
             self.report_data[key] = {'status': 'error', 'error': str(e), 'label': label}
 
     def _build_cross_pair(self, label):
@@ -192,7 +192,7 @@ class StockMarketBot:
     # -------------------------- Crypto --------------------------
     def fetch_crypto_data(self, symbol, name):
         try:
-            print(f"📊 Generating {name} forecast...")
+            print(f"Generating {name} forecast...")
             data = yf.Ticker(symbol).history(period="90d")
             df = self._make_df_from_yf(data)
             if len(df) < 10:
@@ -205,7 +205,7 @@ class StockMarketBot:
                 filename = f"{symbol.lower()}_forecast_{self.timestamp}.csv"
                 filepath = os.path.join(self.save_directory, filename)
                 forecast.to_csv(filepath, index=False)
-                print(f"✅ {name} forecast saved to {filepath}")
+                print(f"{name} forecast saved to {filepath}")
                 current = df['y'].iloc[-1]
                 future = forecast['Forecast'].iloc[-1]
                 change_pct = ((future - current) / current) * 100
@@ -214,7 +214,7 @@ class StockMarketBot:
             else:
                 self.report_data[symbol.lower()] = {'status': 'error', 'label': name}
         except Exception as e:
-            print(f"❌ Error in {name} forecast: {e}")
+            print(f"Error in {name} forecast: {e}")
             self.report_data[symbol.lower()] = {'status': 'error', 'error': str(e), 'label': name}
 
     # -------------------------- Indexes & ETFs --------------------------
@@ -234,7 +234,7 @@ class StockMarketBot:
                 filename = f"{safe_name}_forecast_{self.timestamp}.csv"
                 filepath = os.path.join(self.save_directory, filename)
                 forecast.to_csv(filepath, index=False)
-                print(f"✅ {name} forecast saved to {filepath}")
+                print(f"{name} forecast saved to {filepath}")
                 current = df['y'].iloc[-1]
                 future = forecast['Forecast'].iloc[-1]
                 change_pct = ((future - current) / current) * 100
@@ -245,12 +245,12 @@ class StockMarketBot:
                 key = name.lower().replace(' ', '').replace('&', '')
                 self.report_data[key] = {'status': 'error', 'label': name}
         except Exception as e:
-            print(f"❌ Error in {name} forecast: {e}")
+            print(f"Error in {name} forecast: {e}")
             key = name.lower().replace(' ', '').replace('&', '')
             self.report_data[key] = {'status': 'error', 'error': str(e), 'label': name}
 
     def fetch_psei_data(self):
-        print("📊 Generating PSEi forecast...")
+        print("Generating PSEi forecast...")
         psei_tickers = ["^PSI", "PSEI.PS", "^PSEI", "PSI.PS"]
         for ticker in psei_tickers:
             try:
@@ -264,7 +264,7 @@ class StockMarketBot:
                     filename = f"psei_forecast_{self.timestamp}.csv"
                     filepath = os.path.join(self.save_directory, filename)
                     forecast.to_csv(filepath, index=False)
-                    print(f"✅ PSEi forecast saved to {filepath}")
+                    print(f"PSEi forecast saved to {filepath}")
                     current = df['y'].iloc[-1]
                     future = forecast['Forecast'].iloc[-1]
                     change_pct = ((future - current) / current) * 100
@@ -272,7 +272,7 @@ class StockMarketBot:
                     self.forecasts['psei'] = forecast
                     return
             except Exception as e:
-                print(f"   ❌ Error with {ticker}: {e}")
+                print(f"   Error with {ticker}: {e}")
                 continue
         try:
             print("   Trying EPHE (MSCI Philippines ETF) as proxy")
@@ -283,7 +283,7 @@ class StockMarketBot:
                 filename = f"psei_proxy_ephe_forecast_{self.timestamp}.csv"
                 filepath = os.path.join(self.save_directory, filename)
                 forecast.to_csv(filepath, index=False)
-                print(f"✅ EPHE proxy forecast saved to {filepath}")
+                print(f"EPHE proxy forecast saved to {filepath}")
                 current = df['y'].iloc[-1]
                 future = forecast['Forecast'].iloc[-1]
                 change_pct = ((future - current) / current) * 100
@@ -291,13 +291,13 @@ class StockMarketBot:
                 self.forecasts['psei'] = forecast
                 return
         except Exception as e:
-            print(f"   ❌ EPHE proxy failed: {e}")
-        print("⚠️ All PSEi tickers failed, using fallback data")
+            print(f"   EPHE proxy failed: {e}")
+        print("All PSEi tickers failed, using fallback data")
         self.report_data['psei'] = {'status': 'error', 'error': 'All tickers failed'}
 
     def fetch_ph_reits_data(self):
         try:
-            print("📊 Generating Philippine REITs forecast...")
+            print("Generating Philippine REITs forecast...")
             data = yf.Ticker("VNQ").history(period="90d")
             df = self._make_df_from_yf(data)
             if len(df) < 10:
@@ -308,7 +308,7 @@ class StockMarketBot:
                 filename = f"ph_reits_forecast_{self.timestamp}.csv"
                 filepath = os.path.join(self.save_directory, filename)
                 forecast.to_csv(filepath, index=False)
-                print(f"✅ Philippine REITs forecast saved to {filepath}")
+                print(f"Philippine REITs forecast saved to {filepath}")
                 current = df['y'].iloc[-1]
                 future = forecast['Forecast'].iloc[-1]
                 change_pct = ((future - current) / current) * 100
@@ -317,7 +317,7 @@ class StockMarketBot:
             else:
                 self.report_data['phreits'] = {'status': 'error'}
         except Exception as e:
-            print(f"❌ Error in Philippine REITs forecast: {e}")
+            print(f"Error in Philippine REITs forecast: {e}")
             self.report_data['phreits'] = {'status': 'error', 'error': str(e)}
 
     # -------------------------- US Movers --------------------------
@@ -340,13 +340,13 @@ class StockMarketBot:
                         movers[cat].append({'ticker': ticker, 'name': name, 'change_pct': change_pct})
             self.report_data['us_movers'] = movers
         except Exception as e:
-            print(f"❌ Error fetching US movers: {e}")
+            print(f"Error fetching US movers: {e}")
             self.report_data['us_movers'] = movers
 
     # -------------------------- News + Dynamic Ticker Detection --------------------------
     def fetch_news_headlines(self):
         try:
-            print("📰 Fetching news headlines...")
+            print("Fetching news headlines...")
             news_sources = [
                 ("Reuters Finance", "https://www.reuters.com/business/finance/", 'article a[href]'),
                 ("Yahoo Finance", "https://finance.yahoo.com/news/", 'a[href] h3'),
@@ -429,7 +429,7 @@ class StockMarketBot:
 
     # -------------------------- Report Generation --------------------------
     def generate_report(self):
-        print("✅ Financial report compiled successfully")
+        print("Financial report compiled successfully")
         print("\n" + "="*60)
         print("GENERATED REPORT:")
         print("="*60)
