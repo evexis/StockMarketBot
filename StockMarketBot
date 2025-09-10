@@ -26,7 +26,7 @@ logging.getLogger('prophet').setLevel(logging.WARNING)
 logging.getLogger('cmdstanpy').setLevel(logging.ERROR)  # Silence chain processing logs
 
 class StockMarketBot:
-    def __init__(self, save_directory="/home/ecdayrit/Documents"):
+    def __init__(self, save_directory="/home/user/Documents"):
         self.save_directory = save_directory
         self.timestamp = datetime.now().strftime("%Y%m%d")
         self.report_data = {}
