@@ -97,4 +97,4 @@ PRs and suggestions welcome! Please fork the repo and open an issue or pull requ
 
 📜 License
 
-MIT License © 2025 Enrique Dayrit IV
+MIT License © 2025
