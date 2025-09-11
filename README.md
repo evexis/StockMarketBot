@@ -4,7 +4,7 @@ StockMarketBot is a Python automation script that generates forecasts and market
 
 **Features**
 
-Forecasts for:
+Forecasts for: (you can add more to your liking but these are the ones that i'm currently monitoring)
 
   USD/PHP, GBP/PHP, AUD/PHP, JPY/PHP, SGD/PHP
 
